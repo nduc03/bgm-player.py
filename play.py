@@ -8,91 +8,115 @@ import os
 import sys
 
 DEBUG = os.environ.get('DEBUG', '0') == '1'
+CHUNK_SIZE = 2048
+MAX_QUEUE_SIZE = 15
+QUEUE_PAUSE_THRESHOLD = 10
+QUEUE_CHECK_INTERVAL = 0.001
 
-# syntax: play.py [intro] loop
-if len(sys.argv) < 2:
-    print('Usage: python3 play.py [path/to/intro] path/to/loop')
-    sys.exit(1)
+def convert_to_pcm_s16le(path):
+    pass
 
-#    when full intro + loop             when only loop is provided
-#         vvvvv                                 vvvv
-intro = sys.argv[1] if len(sys.argv) >= 3 else None
-loop = sys.argv[2] if len(sys.argv) >= 3 else sys.argv[1]
+def parse_args():
+    # syntax: play.py [intro] loop
+    if len(sys.argv) < 2:
+        print('Usage: python3 play.py [path/to/intro] path/to/loop')
+        sys.exit(1)
 
-def get_info(path):
-    cmd = ['ffprobe', '-show_streams', '-of', 'json', path]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    #    when full intro + loop             when only loop is provided
+    #         vvvvv                                 vvvv
+    intro = sys.argv[1] if len(sys.argv) >= 3 else None
+    loop = sys.argv[2] if len(sys.argv) >= 3 else sys.argv[1]
 
-    if result.returncode != 0:
-        raise RuntimeError(f'ffprobe failed: {result.stderr}')
-    info = json.loads(result.stdout)
-    return info['streams'][0]
+    return intro, loop
 
-info = get_info(loop)
+def get_play_command(path):
+    def get_info(path):
+        cmd = ['ffprobe', '-show_streams', '-of', 'json', path]
+        result = subprocess.run(cmd, capture_output=True, text=True)
 
-sample_rate = str(info['sample_rate'])
-channels = str(info['channels'])
-format = 's16le' if info['codec_name'] == 'pcm_s16le' else None
+        if result.returncode != 0:
+            raise RuntimeError(f'ffprobe failed: {result.stderr}')
+        info = json.loads(result.stdout)
+        return info['streams'][0]
 
-if format is None:
-    # TODO use ffmpeg to convert
-    raise RuntimeError(f'Unsupported format: {info["codec_name"]}')
+    info = get_info(path)
 
-command = ['ffplay', '-f', 's16le', '-ac', channels, '-ar', sample_rate, '-nodisp', '-']
+    sample_rate = str(info['sample_rate'])
+    channels = str(info['channels'])
+    format = 's16le' if info['codec_name'] == 'pcm_s16le' else None
 
-chunk_size = 2048
+    if format is None:
+        # TODO use ffmpeg to convert
+        raise RuntimeError(f'Unsupported format: {info["codec_name"]}')
 
-data_queue = queue.Queue(15)
+    command = ['ffplay', '-f', 's16le', '-ac', channels, '-ar', sample_rate, '-nodisp', '-']
 
-def read_loop():
-    with wave.open(loop, 'rb') as wf:
-        while True:
-            data = wf.readframes(chunk_size)
-            if not data:
-                wf.rewind()
-                continue
-            data_queue.put(data)
+    return command
 
-            while data_queue.qsize() > 10:
-                time.sleep(0.001)
 
-def read():
-    if intro is not None:
-        with wave.open(intro, 'rb') as wf:
+class BgmPlayer:
+    def __init__(self):
+        self.intro, self.loop = parse_args()
+
+        self.command = get_play_command(self.loop)
+
+        self.data_queue = queue.Queue(MAX_QUEUE_SIZE)
+
+    def read_loop(self):
+        with wave.open(self.loop, 'rb') as wf:
             while True:
-                data = wf.readframes(chunk_size)
+                data = wf.readframes(CHUNK_SIZE)
                 if not data:
-                    break
-                data_queue.put(data)
+                    wf.rewind()
+                    continue
+                self.data_queue.put(data)
 
-                while data_queue.qsize() > 10:
+                while self.data_queue.qsize() > QUEUE_PAUSE_THRESHOLD:
+                    time.sleep(QUEUE_CHECK_INTERVAL)
+
+    def read(self):
+        if self.intro is not None:
+            with wave.open(self.intro, 'rb') as wf:
+                while True:
+                    data = wf.readframes(CHUNK_SIZE)
+                    if not data:
+                        break
+                    self.data_queue.put(data)
+
+                    while self.data_queue.qsize() > QUEUE_PAUSE_THRESHOLD:
+                        time.sleep(QUEUE_CHECK_INTERVAL)
+        self.read_loop()
+
+
+    def monitor_queue(self):
+        if not DEBUG:
+            return
+        while True:
+            print(f'\n\nQueue size: {self.data_queue.qsize()}\n\n')
+            time.sleep(1)
+
+    def play(self, hide_ffplay_output=True):
+        ffplay_output_to = subprocess.DEVNULL if hide_ffplay_output else None
+        threading.Thread(target=self.read, daemon=True).start()
+        threading.Thread(target=self.monitor_queue, daemon=True).start()
+
+        with subprocess.Popen(self.command, stdin=subprocess.PIPE, stderr=ffplay_output_to) as proc:
+            while True:
+                if self.data_queue.qsize() == 0:
                     time.sleep(0.001)
-    read_loop()
+                    continue
+                data = self.data_queue.get()
+                if not data:
+                    print('something wrong')
+                    break
+                proc.stdin.write(data)
+                proc.stdin.flush()
 
+            proc.stdin.close()
+            proc.wait()
 
-def monitor_queue():
-    if not DEBUG:
-        return
-    while True:
-        print(f'\n\nQueue size: {data_queue.qsize()}\n\n')
-        time.sleep(1)
+        self.data_queue.join()
 
-threading.Thread(target=read, daemon=True).start()
-threading.Thread(target=monitor_queue, daemon=True).start()
-
-with subprocess.Popen(command, stdin=subprocess.PIPE) as proc:
-    while True:
-        if data_queue.qsize() == 0:
-            time.sleep(0.001)
-            continue
-        data = data_queue.get()
-        if not data:
-            print('something wrong')
-            break
-        proc.stdin.write(data)
-        proc.stdin.flush()
-
-    proc.stdin.close()
-    proc.wait()
-
-data_queue.join()
+if __name__ == '__main__':
+    player = BgmPlayer()
+    player.play()
