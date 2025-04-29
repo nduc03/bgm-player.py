@@ -103,7 +103,7 @@ class BgmPlayer:
         with subprocess.Popen(self.command, stdin=subprocess.PIPE, stderr=ffplay_output_to) as proc:
             while True:
                 if self.data_queue.qsize() == 0:
-                    time.sleep(0.001)
+                    time.sleep(QUEUE_CHECK_INTERVAL)
                     continue
                 data = self.data_queue.get()
                 if not data:
@@ -114,8 +114,6 @@ class BgmPlayer:
 
             proc.stdin.close()
             proc.wait()
-
-        self.data_queue.join()
 
 if __name__ == '__main__':
     player = BgmPlayer()
