@@ -39,17 +39,25 @@ def get_play_command(path):
         info = json.loads(result.stdout)
         return info['streams'][0]
 
+    def get_ch_layout(channels):
+        if channels == 1:
+            return 'mono'
+        elif channels == 2:
+            return 'stereo'
+        else:
+            raise ValueError(f'Unsupported number of channels: {channels}')
+
     info = get_info(path)
 
     sample_rate = str(info['sample_rate'])
-    channels = str(info['channels'])
+    channel_layout = get_ch_layout(info['channels'])
     format = 's16le' if info['codec_name'] == 'pcm_s16le' else None
 
     if format is None:
         # TODO use ffmpeg to convert
         raise RuntimeError(f'Unsupported format: {info["codec_name"]}')
 
-    command = ['ffplay', '-f', 's16le', '-ac', channels, '-ar', sample_rate, '-nodisp', '-']
+    command = ['ffplay', '-f', 's16le', '-ch_layout', channel_layout, '-ar', sample_rate, '-nodisp', '-']
 
     return command
 
@@ -117,4 +125,4 @@ class BgmPlayer:
 
 if __name__ == '__main__':
     player = BgmPlayer()
-    player.play()
+    player.play(not DEBUG)
